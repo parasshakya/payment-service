@@ -126,6 +126,14 @@ app.post('/api/khalti/verify', async (req, res) => {
   }
 });
 
+// Root route for server health check
+app.get('/', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'Server is up and running successfully! 🚀',
+  });
+});
+
 // Fallback route handler for undefined endpoints
 app.use((req, res) => {
   res.status(404).json({ success: false, error: 'Route not found' });
@@ -133,5 +141,5 @@ app.use((req, res) => {
 
 // Start listening for requests
 app.listen(PORT, () => {
-  console.log(`🚀 Server listening on http://localhost:${PORT}`);
+console.log(`🚀 Server running on port ${PORT}`);
 });
