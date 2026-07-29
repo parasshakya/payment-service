@@ -28,6 +28,12 @@ app.post('/api/khalti/initiate', async (req, res) => {
 
     // Validation
     if (!amount || !purchase_order_id || !purchase_order_name) {
+      console.log('⚠️ Khalti Initiation validation failed:', {
+        amount,
+        purchase_order_id,
+        purchase_order_name,
+      });
+
       return res.status(400).json({
         success: false,
         error: 'Missing required fields: amount, purchase_order_id, purchase_order_name',
@@ -54,6 +60,8 @@ app.post('/api/khalti/initiate', async (req, res) => {
       },
     });
 
+    console.log('✅ Khalti Initiation Successful:', response.data);
+
     // Send successful response containing `pidx` and `payment_url` back to Flutter
     return res.status(200).json({
       success: true,
@@ -78,6 +86,10 @@ app.post('/api/khalti/verify', async (req, res) => {
     const { pidx } = req.body;
 
     if (!pidx) {
+      console.log('⚠️ Khalti Verification validation failed: missing pidx', {
+        body: req.body,
+      });
+
       return res.status(400).json({
         success: false,
         error: 'pidx parameter is required for verification',
@@ -102,6 +114,7 @@ app.post('/api/khalti/verify', async (req, res) => {
     // Verify if the payment status is 'Completed'
     if (response.data.status === 'Completed') {
       // TODO: Perform database operations here (e.g., mark order as paid in MongoDB)
+      console.log('✅ Khalti Verification Successful:', response.data);
 
       return res.status(200).json({
         success: true,
@@ -109,6 +122,8 @@ app.post('/api/khalti/verify', async (req, res) => {
         data: response.data,
       });
     }
+
+    console.log('⚠️ Khalti Verification returned non-completed status:', response.data.status, response.data);
 
     // Handle non-completed statuses (e.g., Pending, User canceled, Expired)
     return res.status(400).json({
@@ -128,6 +143,7 @@ app.post('/api/khalti/verify', async (req, res) => {
 
 // Root route for server health check
 app.get('/', (req, res) => {
+  console.log('ℹ️  Health check passed');
   res.status(200).json({
     success: true,
     message: 'Server is up and running successfully! 🚀',
@@ -136,6 +152,7 @@ app.get('/', (req, res) => {
 
 // Fallback route handler for undefined endpoints
 app.use((req, res) => {
+  console.log('⚠️  Route not found:', req.method, req.originalUrl);
   res.status(404).json({ success: false, error: 'Route not found' });
 });
 
