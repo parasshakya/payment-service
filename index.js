@@ -62,10 +62,20 @@ app.post('/api/khalti/initiate', async (req, res) => {
 
     console.log('✅ Khalti Initiation Successful:', response.data);
 
+    // ✅ ADD THIS: Append return_url as a query param to payment_url
+// The Flutter SDK reads return_url from paymentUrl's query parameters
+// to know which URL to intercept in the WebView
+const paymentUrlWithReturn =
+  `${response.data.payment_url}&return_url=${encodeURIComponent(payload.return_url)}`;
+
+
     // Send successful response containing `pidx` and `payment_url` back to Flutter
     return res.status(200).json({
       success: true,
-      data: response.data,
+  data: {
+    ...response.data,
+    payment_url: paymentUrlWithReturn, // ← overrides with the enriched URL
+  },
     });
   } catch (error) {
     console.error('Khalti Initiation Error:', error.response?.data || error.message);
