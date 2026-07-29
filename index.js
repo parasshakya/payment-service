@@ -42,8 +42,8 @@ app.post('/api/khalti/initiate', async (req, res) => {
 
     // Construct Khalti Initiation Payload
     const payload = {
-      return_url: 'https://example.com/callback', // Required dummy URL for mobile SDK/WebView
-      website_url: 'https://example.com',
+      return_url: 'https://example.com/callback/', // Required dummy URL for mobile SDK/WebView
+      website_url: 'https://example.com/',
       amount: Math.round(amount * 100), // Converts NPR to Paisa (1 NPR = 100 Paisa)
       purchase_order_id,
       purchase_order_name,
