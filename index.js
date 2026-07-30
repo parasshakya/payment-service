@@ -177,14 +177,18 @@ app.post('/api/esewa/initiate', async (req, res) => {
     const message = `product_code=${product_code},amount=${formattedAmount},transaction_uuid=${transaction_uuid}`;
     const hash = crypto.createHmac('sha256', secret_key).update(message).digest('base64');
 
+    const serverBaseUrl = process.env.SERVER_BASE_URL || `http://localhost:${PORT}`;
+    const callback_url = `${serverBaseUrl}/api/esewa/callback`;
+    const redirect_url = `${serverBaseUrl}/api/esewa/redirect`;
+
     const payload = {
       product_code,
       amount: Number(amount),
       transaction_uuid,
       signed_field_names: 'product_code,amount,transaction_uuid',
       signature: hash,
-      callback_url: 'https://example.com/esewa/callback',
-      redirect_url: 'https://example.com/esewa/redirect',
+      callback_url,
+      redirect_url,
       properties: {
         customer_id: 'CUST123',
         remarks: 'Payment Demo',
@@ -212,6 +216,54 @@ app.post('/api/esewa/initiate', async (req, res) => {
       error: error.response?.data || error.message,
     });
   }
+});
+
+/**
+ * 2. ESEWA WEBHOOK / CALLBACK ENDPOINT (Server-to-Server)
+ * eSewa calls this endpoint automatically after a payment is completed
+ */
+app.post('/api/esewa/callback', (req, res) => {
+  console.log('🔔 eSewa Webhook / Callback Received:', req.body);
+  
+  // TODO: Verify signature and update order status in your database (e.g. MongoDB/PostgreSQL)
+  
+  // Always respond with 200 OK so eSewa knows the callback was received
+  return res.status(200).json({
+    success: true,
+    message: 'Webhook received successfully',
+  });
+});
+
+/**
+ * 3. ESEWA REDIRECT ENDPOINT (Browser/App Redirect)
+ * User is redirected here after completing/canceling payment in browser mode
+ */
+app.all('/api/esewa/redirect', (req, res) => {
+  console.log('🔄 eSewa Redirect Triggered:', {
+    query: req.query,
+    body: req.body,
+  });
+
+  return res.status(200).send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>Payment Redirect</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          body { font-family: sans-serif; text-align: center; padding: 50px; background-color: #f7f9fc; }
+          .card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); display: inline-block; }
+          h2 { color: #28a745; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h2>Payment Processed</h2>
+          <p>Thank you! You may close this window and return to your app.</p>
+        </div>
+      </body>
+    </html>
+  `);
 });
 
 /**
