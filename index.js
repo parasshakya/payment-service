@@ -2,6 +2,13 @@ import 'dotenv/config'; // Loads .env into process.env automatically
 import express from 'express';
 import axios from 'axios';
 import crypto from 'crypto';
+import {
+  initDb,
+  saveOrder,
+  updateKhaltiOrderStatus,
+  updateEsewaOrderStatus,
+  getAllOrders,
+} from './db.js';
 
 const app = express();
 
@@ -19,8 +26,11 @@ if (!KHALTI_SECRET_KEY || !KHALTI_BASE_URL) {
   process.exit(1); // Stops the server from starting up with invalid configuration
 }
 
+// Initialize PostgreSQL Database Table
+initDb();
+
 /**
- * 1. INITIATE PAYMENT ENDPOINT
+ * 1. KHALTI INITIATE PAYMENT ENDPOINT
  * Receives payment details from Flutter and requests a `pidx` from Khalti
  */
 app.post('/api/khalti/initiate', async (req, res) => {
@@ -63,19 +73,26 @@ app.post('/api/khalti/initiate', async (req, res) => {
 
     console.log('✅ Khalti Initiation Successful:', response.data);
 
-    // ✅ ADD THIS: Append return_url as a query param to payment_url
-    // The Flutter SDK reads return_url from paymentUrl's query parameters
-    // to know which URL to intercept in the WebView
+    // Save initial transaction state in PostgreSQL
+    await saveOrder({
+      order_id: purchase_order_id,
+      gateway: 'KHALTI',
+      amount,
+      status: 'PENDING',
+      pidx: response.data.pidx,
+      customer_info: customer_info || {},
+    });
+
+    // Append return_url as a query param to payment_url for Flutter SDK interception
     const paymentUrlWithReturn =
       `${response.data.payment_url}&return_url=${encodeURIComponent(payload.return_url)}`;
-
 
     // Send successful response containing `pidx` and `payment_url` back to Flutter
     return res.status(200).json({
       success: true,
       data: {
         ...response.data,
-        payment_url: paymentUrlWithReturn, // ← overrides with the enriched URL
+        payment_url: paymentUrlWithReturn,
       },
     });
   } catch (error) {
@@ -89,8 +106,8 @@ app.post('/api/khalti/initiate', async (req, res) => {
 });
 
 /**
- * 2. VERIFY / LOOKUP PAYMENT ENDPOINT
- * Receives `pidx` from Flutter to verify the transaction status with Khalti
+ * 2. KHALTI VERIFY / LOOKUP PAYMENT ENDPOINT
+ * Receives `pidx` from Flutter to verify transaction status with Khalti
  */
 app.post('/api/khalti/verify', async (req, res) => {
   try {
@@ -118,13 +135,17 @@ app.post('/api/khalti/verify', async (req, res) => {
             : `Key ${KHALTI_SECRET_KEY}`,
           'Content-Type': 'application/json',
         },
-
       }
     );
 
-    // Verify if the payment status is 'Completed'
-    if (response.data.status === 'Completed') {
-      // TODO: Perform database operations here (e.g., mark order as paid in MongoDB)
+    const isCompleted = response.data.status === 'Completed';
+    const status = isCompleted ? 'COMPLETED' : (response.data.status || 'FAILED');
+    const transactionId = response.data.transaction_id || response.data.idx || null;
+
+    // Update order status in PostgreSQL
+    await updateKhaltiOrderStatus(pidx, status, transactionId);
+
+    if (isCompleted) {
       console.log('✅ Khalti Verification Successful:', response.data);
 
       return res.status(200).json({
@@ -136,7 +157,6 @@ app.post('/api/khalti/verify', async (req, res) => {
 
     console.log('⚠️ Khalti Verification returned non-completed status:', response.data.status, response.data);
 
-    // Handle non-completed statuses (e.g., Pending, User canceled, Expired)
     return res.status(400).json({
       success: false,
       message: `Payment status is ${response.data.status}`,
@@ -152,9 +172,8 @@ app.post('/api/khalti/verify', async (req, res) => {
   }
 });
 
-
 /**
- * 1. ESEWA INITIATE / BOOK PAYMENT ENDPOINT
+ * 3. ESEWA INITIATE / BOOK PAYMENT ENDPOINT
  */
 app.post('/api/esewa/initiate', async (req, res) => {
   try {
@@ -168,12 +187,11 @@ app.post('/api/esewa/initiate', async (req, res) => {
       });
     }
 
-    const product_code = process.env.ESEWA_PRODUCT_CODE;
-    const secret_key = process.env.ESEWA_SECRET_KEY;
+    const product_code = process.env.ESEWA_PRODUCT_CODE || 'INTENT';
+    const secret_key = process.env.ESEWA_SECRET_KEY || 'LB0REg8HUSw3MTYrI1s6JTE8Kyc6JyAqJiA3MQ==';
     const transaction_uuid = purchase_order_id || `txn-${Date.now()}`;
     const formattedAmount = String(amount);
 
-    // Signature calculation message format: product_code=...,amount=...,transaction_uuid=...
     const message = `product_code=${product_code},amount=${formattedAmount},transaction_uuid=${transaction_uuid}`;
     const hash = crypto.createHmac('sha256', secret_key).update(message).digest('base64');
 
@@ -203,9 +221,21 @@ app.post('/api/esewa/initiate', async (req, res) => {
 
     console.log('✅ eSewa Initiation Successful:', response.data);
 
+    const bookingData = response.data?.data || {};
+
+    // Save initial transaction state in PostgreSQL
+    await saveOrder({
+      order_id: transaction_uuid,
+      gateway: 'ESEWA',
+      amount,
+      status: 'BOOKED',
+      booking_id: bookingData.booking_id,
+      correlation_id: bookingData.correlation_id,
+    });
+
     return res.status(200).json({
       success: true,
-      data: response.data.data, // { booking_id, deeplink, correlation_id }
+      data: bookingData,
       transaction_uuid,
     });
   } catch (error) {
@@ -219,15 +249,18 @@ app.post('/api/esewa/initiate', async (req, res) => {
 });
 
 /**
- * 2. ESEWA WEBHOOK / CALLBACK ENDPOINT (Server-to-Server)
- * eSewa calls this endpoint automatically after a payment is completed
+ * 4. ESEWA WEBHOOK / CALLBACK ENDPOINT (Server-to-Server)
  */
-app.post('/api/esewa/callback', (req, res) => {
+app.post('/api/esewa/callback', async (req, res) => {
   console.log('🔔 eSewa Webhook / Callback Received:', req.body);
-  
-  // TODO: Verify signature and update order status in your database (e.g. MongoDB/PostgreSQL)
-  
-  // Always respond with 200 OK so eSewa knows the callback was received
+
+  const { booking_id, status, transaction_id, reference_code } = req.body || {};
+
+  if (booking_id) {
+    const updatedStatus = status === 'SUCCESS' || status === 'COMPLETED' ? 'SUCCESS' : (status || 'FAILED');
+    await updateEsewaOrderStatus(booking_id, updatedStatus, transaction_id, reference_code);
+  }
+
   return res.status(200).json({
     success: true,
     message: 'Webhook received successfully',
@@ -235,8 +268,7 @@ app.post('/api/esewa/callback', (req, res) => {
 });
 
 /**
- * 3. ESEWA REDIRECT ENDPOINT (Browser/App Redirect)
- * User is redirected here after completing/canceling payment in browser mode
+ * 5. ESEWA REDIRECT ENDPOINT (Browser/App Redirect)
  */
 app.all('/api/esewa/redirect', (req, res) => {
   console.log('🔄 eSewa Redirect Triggered:', {
@@ -267,7 +299,7 @@ app.all('/api/esewa/redirect', (req, res) => {
 });
 
 /**
- * 2. ESEWA STATUS CHECK / VERIFY ENDPOINT
+ * 6. ESEWA STATUS CHECK / VERIFY ENDPOINT
  */
 app.post('/api/esewa/verify', async (req, res) => {
   try {
@@ -284,7 +316,6 @@ app.post('/api/esewa/verify', async (req, res) => {
     const product_code = process.env.ESEWA_PRODUCT_CODE || 'INTENT';
     const secret_key = process.env.ESEWA_SECRET_KEY || 'LB0REg8HUSw3MTYrI1s6JTE8Kyc6JyAqJiA3MQ==';
 
-    // Signature calculation message format: booking_id=...,product_code=...,correlation_id=...
     const message = `booking_id=${booking_id},product_code=${product_code},correlation_id=${correlation_id}`;
     const hash = crypto.createHmac('sha256', secret_key).update(message).digest('base64');
 
@@ -302,18 +333,23 @@ app.post('/api/esewa/verify', async (req, res) => {
       { headers: { 'Content-Type': 'application/json' } }
     );
 
-    const isSuccess = response.data?.data?.status === 'SUCCESS';
+    const data = response.data?.data || {};
+    const isSuccess = data.status === 'SUCCESS';
+    const dbStatus = isSuccess ? 'SUCCESS' : (data.status || 'FAILED');
+
+    // Update order status in PostgreSQL
+    await updateEsewaOrderStatus(booking_id, dbStatus, data.transaction_id, data.reference_code);
 
     if (isSuccess) {
       console.log('✅ eSewa Verification Successful:', response.data);
     } else {
-      console.log('⚠️ eSewa Verification returned non-success status:', response.data?.data?.status, response.data);
+      console.log('⚠️ eSewa Verification returned non-success status:', data.status, response.data);
     }
 
     return res.status(isSuccess ? 200 : 400).json({
       success: isSuccess,
-      message: response.data?.message || `Payment status is ${response.data?.data?.status}`,
-      data: response.data?.data,
+      message: response.data?.message || `Payment status is ${data.status}`,
+      data: data,
     });
   } catch (error) {
     console.error('❌ eSewa Verification Error:', error.response?.data || error.message);
@@ -325,6 +361,24 @@ app.post('/api/esewa/verify', async (req, res) => {
   }
 });
 
+/**
+ * 7. GET ALL ORDERS HISTORY ENDPOINT
+ */
+app.get('/api/orders', async (req, res) => {
+  try {
+    const orders = await getAllOrders();
+    return res.status(200).json({
+      success: true,
+      count: orders.length,
+      orders,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
 
 // Root route for server health check
 app.get('/', (req, res) => {
