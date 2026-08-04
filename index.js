@@ -51,9 +51,11 @@ app.post('/api/khalti/initiate', async (req, res) => {
       });
     }
 
+    const serverBaseUrl = process.env.SERVER_BASE_URL;
+
     // Construct Khalti Initiation Payload
     const payload = {
-      return_url: 'https://example.com/callback', // Required dummy URL for mobile SDK/WebView
+      return_url: `${serverBaseUrl}/api/khalti/callback`, // GET callback after user completes payment
       website_url: 'https://example.com/',
       amount: Math.round(amount * 100), // Converts NPR to Paisa (1 NPR = 100 Paisa)
       purchase_order_id,
@@ -173,7 +175,128 @@ app.post('/api/khalti/verify', async (req, res) => {
 });
 
 /**
- * 3. ESEWA INITIATE / BOOK PAYMENT ENDPOINT
+ * 3. KHALTI BROWSER REDIRECT CALLBACK ENDPOINT (Web Integration)
+ * Khalti redirects the user's browser here after payment via GET with query params:
+ * ?pidx=...&status=Completed&transaction_id=...&amount=...&mobile=...&purchase_order_id=...
+ *
+ * Note: In Flutter SDK integration, this URL is intercepted by the SDK and never
+ * actually hit as an HTTP request. This handler is for web-based integrations.
+ */
+app.get('/api/khalti/callback', async (req, res) => {
+  const { pidx, status, transaction_id, amount, purchase_order_id } = req.query;
+
+  console.log('🔔 Khalti Browser Callback Received:', req.query);
+
+  if (!pidx) {
+    return res.status(400).send(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>Payment Error</title></head>
+        <body style="font-family:sans-serif;text-align:center;padding:50px;">
+          <h2 style="color:#dc3545;">❌ Invalid Callback</h2>
+          <p>Missing payment identifier (pidx). Please contact support.</p>
+        </body>
+      </html>
+    `);
+  }
+
+  // Handle user-canceled payment without calling Lookup API
+  if (status === 'User canceled') {
+    await updateKhaltiOrderStatus(pidx, 'CANCELED', null);
+    return res.status(200).send(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>Payment Canceled</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>body{font-family:sans-serif;text-align:center;padding:50px;background:#f7f9fc;}.card{background:white;padding:30px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.1);display:inline-block;}</style>
+        </head>
+        <body>
+          <div class="card">
+            <h2 style="color:#6c757d;">Payment Canceled</h2>
+            <p>You canceled the payment. You may return to the app and try again.</p>
+          </div>
+        </body>
+      </html>
+    `);
+  }
+
+  try {
+    // Call Khalti Lookup API to verify the actual payment status
+    const lookupResponse = await axios.post(
+      `${KHALTI_BASE_URL}/epayment/lookup/`,
+      { pidx },
+      {
+        headers: {
+          Authorization: KHALTI_SECRET_KEY.startsWith('Key ') || KHALTI_SECRET_KEY.startsWith('key ')
+            ? KHALTI_SECRET_KEY
+            : `Key ${KHALTI_SECRET_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const isCompleted = lookupResponse.data.status === 'Completed';
+    const verifiedStatus = isCompleted ? 'COMPLETED' : (lookupResponse.data.status || 'FAILED');
+    const verifiedTxnId = lookupResponse.data.transaction_id || lookupResponse.data.idx || null;
+
+    // Update order status in PostgreSQL
+    await updateKhaltiOrderStatus(pidx, verifiedStatus, verifiedTxnId);
+
+    if (isCompleted) {
+      console.log('✅ Khalti Callback Verification Successful:', lookupResponse.data);
+      return res.status(200).send(`
+        <!DOCTYPE html>
+        <html>
+          <head><title>Payment Successful</title>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <style>body{font-family:sans-serif;text-align:center;padding:50px;background:#f7f9fc;}.card{background:white;padding:30px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.1);display:inline-block;}</style>
+          </head>
+          <body>
+            <div class="card">
+              <h2 style="color:#28a745;">✅ Payment Successful!</h2>
+              <p>Order <strong>${purchase_order_id || pidx}</strong> has been confirmed.</p>
+              <p>Transaction ID: <code>${verifiedTxnId || transaction_id || 'N/A'}</code></p>
+              <p>You may close this window and return to the app.</p>
+            </div>
+          </body>
+        </html>
+      `);
+    }
+
+    console.log('⚠️ Khalti Callback: non-completed status:', lookupResponse.data.status);
+    return res.status(400).send(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>Payment Failed</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>body{font-family:sans-serif;text-align:center;padding:50px;background:#f7f9fc;}.card{background:white;padding:30px;border-radius:12px;box-shadow:0 4px 12px rgba(0,0,0,0.1);display:inline-block;}</style>
+        </head>
+        <body>
+          <div class="card">
+            <h2 style="color:#dc3545;">❌ Payment Failed</h2>
+            <p>Status: <strong>${lookupResponse.data.status}</strong></p>
+            <p>Please try again or contact support.</p>
+          </div>
+        </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error('❌ Khalti Callback Lookup Error:', error.response?.data || error.message);
+    return res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+        <head><title>Verification Error</title></head>
+        <body style="font-family:sans-serif;text-align:center;padding:50px;">
+          <h2 style="color:#dc3545;">⚠️ Verification Error</h2>
+          <p>Could not verify payment status. Please contact support with your order ID.</p>
+        </body>
+      </html>
+    `);
+  }
+});
+
+/**
+ * 4. ESEWA INITIATE / BOOK PAYMENT ENDPOINT
  */
 app.post('/api/esewa/initiate', async (req, res) => {
   try {
